@@ -17,11 +17,37 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
 from app.bio import MAX_FASTA_BYTES, MAX_VCF_BYTES  # noqa: E402
+from app.convert import MAX_MAP_BYTES  # noqa: E402
 
 client = TestClient(app)
 
 FASTA = b">chrT\nACGTAAAACGTT\n"
 HEADER = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
+
+# 转换夹具：旧参考 AACGTACG；块 [1,4] 反向到新 [1,4]=CGTT，块 [5,8] 正向到新 [5,8]
+OLD_FASTA = b">chrOld\nAACGTACG\n"
+NEW_FASTA = b">chrNew\nCGTTTACG\n"
+MAPPING = b"1\t4\t1\t4\t-\n5\t8\t5\t8\t+\n"
+CONV_HEADER = (
+    "##fileformat=VCFv4.2\n"
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
+)
+
+
+def conv_vcf(rows):
+    return (CONV_HEADER + "".join(r + "\n" for r in rows)).encode()
+
+
+def conv_upload(old=OLD_FASTA, new=NEW_FASTA, mapping=MAPPING, vcf=None):
+    return client.post(
+        "/convert",
+        files={
+            "old_fasta": ("old.fa", old, "text/plain"),
+            "new_fasta": ("new.fa", new, "text/plain"),
+            "mapping": ("map.tsv", mapping, "text/plain"),
+            "vcf": ("src.vcf", vcf if vcf is not None else b"", "text/plain"),
+        },
+    )
 
 
 def vcf(rows):
@@ -146,6 +172,103 @@ class WebTests(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 422)
         self.assertFalse(resp.json()["ok"])
+
+
+class ConvertWebTests(unittest.TestCase):
+    def test_convert_page_renders_with_nav(self):
+        resp = client.get("/convert")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("参考坐标转换".encode(), resp.content)
+        self.assertIn("old_fasta".encode(), resp.content)
+        # 首页导航仍指向原有核对功能
+        home = client.get("/")
+        self.assertIn("/convert".encode(), home.content)
+
+    def test_convert_happy_path_downloads_target_vcf(self):
+        data = conv_vcf([
+            "chrOld\t3\t.\tC\tG\t.\t.\t.\tGT\t0/1",   # 反向块 -> 2:G>C
+            "chrOld\t5\t.\tT\tA\t.\t.\t.\tGT\t1/1",   # 正向块 -> 5:T>A
+        ])
+        resp = conv_upload(vcf=data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["content-type"].startswith("text/vcf"))
+        self.assertIn("attachment", resp.headers["content-disposition"])
+        body = resp.text
+        self.assertIn("##reference=chrNew", body)
+        self.assertIn("chrNew\t2\t.\tG\tC\t.\t.\tSRC=3\tGT\t0/1", body)
+        self.assertIn("chrNew\t5\t.\tT\tA\t.\t.\tSRC=4\tGT\t1/1", body)
+        self.assertEqual(resp.headers["X-Record-Count"], "2")
+
+    def test_convert_reverse_strand_indel_reanchored(self):
+        # 旧 pos4 G>GC 插入，反向块 RC + 镜像后为新 pos1 C>GC
+        data = conv_vcf(["chrOld\t4\t.\tG\tGC\t.\t.\t.\tGT\t0/1"])
+        resp = conv_upload(vcf=data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("chrNew\t1\t.\tC\tGC", resp.text)
+
+    def test_convert_failure_returns_422_page_no_partial_file(self):
+        # 跨块缺失 [4,5]
+        data = conv_vcf(["chrOld\t4\t.\tGT\tG\t.\t.\t.\tGT\t0/1"])
+        resp = conv_upload(vcf=data)
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("转换失败", resp.text)
+        self.assertNotIn("##fileformat", resp.text)
+
+    def test_convert_multi_alt_rejected(self):
+        data = conv_vcf(["chrOld\t3\t.\tC\tG,T\t.\t.\t.\tGT\t1/2"])
+        resp = conv_upload(vcf=data)
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("单 ALT", resp.text)
+
+    def test_convert_size_limits(self):
+        big_fasta = b">chrOld\n" + b"A" * (MAX_FASTA_BYTES + 10)
+        resp = conv_upload(old=big_fasta, vcf=conv_vcf([]))
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("超过大小上限", resp.text)
+
+        big_map = b"1\t2\t1\t2\t+\t" + b"x" * (MAX_MAP_BYTES + 10) + b"\n"
+        resp = conv_upload(mapping=big_map, vcf=conv_vcf([]))
+        self.assertEqual(resp.status_code, 422)
+
+        big_vcf = CONV_HEADER.encode() + b"#\n" * (MAX_VCF_BYTES // 2)
+        resp = conv_upload(vcf=big_vcf)
+        self.assertEqual(resp.status_code, 422)
+
+    def test_convert_empty_file_rejected(self):
+        resp = conv_upload(vcf=b"")
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("为空", resp.text)
+
+    def test_api_convert_returns_vcf_stream(self):
+        data = conv_vcf(["chrOld\t3\t.\tC\tG\t.\t.\t.\tGT\t0/1"])
+        resp = client.post(
+            "/api/convert",
+            files={
+                "old_fasta": ("old.fa", OLD_FASTA, "text/plain"),
+                "new_fasta": ("new.fa", NEW_FASTA, "text/plain"),
+                "mapping": ("map.tsv", MAPPING, "text/plain"),
+                "vcf": ("src.vcf", data, "text/plain"),
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("SRC=3", resp.text)
+        self.assertIn("attachment", resp.headers["content-disposition"])
+
+    def test_api_convert_failure_json(self):
+        data = conv_vcf(["chrOld\t4\t.\tGT\tG\t.\t.\t.\tGT\t0/1"])
+        resp = client.post(
+            "/api/convert",
+            files={
+                "old_fasta": ("old.fa", OLD_FASTA, "text/plain"),
+                "new_fasta": ("new.fa", NEW_FASTA, "text/plain"),
+                "mapping": ("map.tsv", MAPPING, "text/plain"),
+                "vcf": ("src.vcf", data, "text/plain"),
+            },
+        )
+        self.assertEqual(resp.status_code, 422)
+        payload = resp.json()
+        self.assertFalse(payload["ok"])
+        self.assertIn("跨块", payload["error"])
 
 
 if __name__ == "__main__":

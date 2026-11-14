@@ -1,9 +1,16 @@
-# 双 VCF 变异核对（FastAPI）
+# VCF 变异工具集（FastAPI）
 
-同一参考、同一样本下，核对两套变异识别程序输出的单样本 VCF，按**归一化后的等位变异**
-列出两侧一致、仅单侧出现与剂量不符的结果，并保留每条结论的 VCF 原始行号，供人工复查。
+两个相互独立、共用同一套校验规则的流程：
 
-## 功能与判定规则
+1. **双 VCF 变异核对**：同一参考、同一样本下，核对两套变异识别程序输出的单样本 VCF，
+   按**归一化后的等位变异**列出两侧一致、仅单侧出现与剂量不符的结果，并保留每条结论的
+   VCF 原始行号，供人工复查。
+2. **参考坐标转换（liftover）**：把按**旧参考**调用的单样本 VCF，依据制表符坐标映射表
+   整批转换到**新参考**，输出标注源行号与 GT 的目标 VCF；反向块自动反向互补并重新锚定。
+
+## 双 VCF 核对
+
+### 功能与判定规则
 
 - **输入限制**
   - 单条染色体参考 FASTA，纯 A/C/G/T 序列，不超过 **1 MiB**；
@@ -27,15 +34,60 @@
 ## 目录结构
 
 ```
-app/            FastAPI 应用与核心比对逻辑（bio.py 仅用标准库）
-  main.py       路由与上传校验
+app/            FastAPI 应用与核心逻辑（bio.py / convert.py 仅用标准库）
+  main.py       路由与上传校验（/compare 核对、/convert 转换）
   bio.py        FASTA/VCF 解析、左对齐归一化、剂量与分组
+  convert.py    映射块解析、正反向坐标转换、反向互补重锚定、目标 VCF 生成
   templates/    上传页与结果页（Jinja2）
-tests/          47 个单元 / 端到端测试
-samples/        可直接试用的演示数据（demo.fa + 两份 VCF）
-scripts/        演示 VCF 生成器（坐标由参考自动计算）
+tests/          单元 / 端到端测试（bio 41、convert 43、web 16）
+samples/        可直接试用的演示数据
+scripts/        演示数据生成器（坐标由参考自动计算）
 Dockerfile, docker-compose.yml, requirements.txt
 ```
+
+## 参考坐标转换（旧参考 → 新参考）
+
+### 输入
+
+- 旧、新两份**单条染色体** FASTA（纯 A/C/G/T，各不超过 1 MiB）；
+- 制表符映射表（不超过 256 KiB）：每行一个映射块，5 列为
+  `旧起点 ⇥ 旧终点 ⇥ 新起点 ⇥ 新终点 ⇥ 方向`，坐标均为 **1 基闭区间**，
+  方向取 `+`（正向）或 `-`（反向）；首行允许写列名表头
+  `old_start old_end new_start new_end strand`；
+- 按旧参考调用的**单样本** VCF（不超过 256 KiB），每行**恰好一个 ALT**。
+
+映射表约束：每个块两侧区间**等长**；同一侧各块之间**互不重叠**（端点相接允许）。
+
+### 转换规则
+
+- 沿用核对工具的文件大小限制、旧参考 **REF 校验**与**未分相二倍体 GT** 规则；
+  仅接受单碱基替换，或事件长度不超过 **20 bp** 的纯插入 / 纯缺失。
+- 变异的旧参考 REF 区间必须被**同一个映射块完整覆盖**；跨块或落在映射缺口内即失败。
+- 正向块坐标一一对应；**反向块**先把坐标镜像到新链，再把 REF/ALT **反向互补**，
+  插缺按 VCF 锚定约定在新链上重新锚定，最后统一对照新参考做 REF 校验与左对齐归一化。
+- 同一目标归一变异**合并剂量**：目标 VCF 用 `INFO/SRC` 标注全部源 VCF 物理行号，
+  GT 写合并后的 `0/1` 或 `1/1`（剂量 0 的 `0/0` 源记录不产生变异）。
+- **整批失败**（HTTP 422，只显示错误、不生成任何部分文件）：变异跨块、无映射、
+  目标 REF 与新参考不符、合并剂量超过二倍体上限 2，以及任何不满足输入规则的情形。
+
+### 试用
+
+浏览器打开 <http://localhost:8000/convert>，依次选择
+`samples/old_ref.fa`、`samples/new_ref.fa`、`samples/liftover.map.tsv`、
+`samples/source.vcf`，提交后浏览器直接下载 `target.vcf`。
+
+也可以走 JSON/文件流接口（成功返回 VCF 文件流，失败返回 422 JSON）：
+
+```bash
+curl -OJ -F old_fasta=@samples/old_ref.fa \
+        -F new_fasta=@samples/new_ref.fa \
+        -F mapping=@samples/liftover.map.tsv \
+        -F vcf=@samples/source.vcf \
+        http://localhost:8000/api/convert
+```
+
+演示数据由 `python3 scripts/make_liftover_demo.py` 生成，覆盖正向 / 反向块上的
+SNV、插入、缺失，以及重排后按新坐标排序与纯合剂量输出。
 
 ## 用 Docker Compose 启动（推荐）
 

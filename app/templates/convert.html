@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}参考坐标转换 · VCF 工具{% endblock %}
+{% block body %}
+{% if error %}
+<div class="alert error">
+  转换失败：{{ error }}<br>
+  <span style="font-weight:400;font-size:13.5px">按要求本次为整批失败，未生成任何目标文件，请修正输入后重新上传。</span>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>上传文件（旧参考 → 新参考）</h2>
+  <form action="/convert" method="post" enctype="multipart/form-data">
+    <label class="field">
+      旧参考 FASTA（单条染色体）
+      <span class="hint">（纯 A/C/G/T，不超过 {{ fasta_limit_kib }} KiB）</span>
+      <input type="file" name="old_fasta" accept=".fa,.fasta,.fna,text/plain" required>
+    </label>
+    <label class="field">
+      新参考 FASTA（单条染色体）
+      <span class="hint">（纯 A/C/G/T，不超过 {{ fasta_limit_kib }} KiB）</span>
+      <input type="file" name="new_fasta" accept=".fa,.fasta,.fna,text/plain" required>
+    </label>
+    <label class="field">
+      坐标映射表（制表符 TSV）
+      <span class="hint">（每行 5 列：旧起点⇥旧终点⇥新起点⇥新终点⇥方向(+/-)，1 基闭区间；不超过 {{ map_limit_kib }} KiB）</span>
+      <input type="file" name="mapping" accept=".tsv,.txt,.map,text/plain" required>
+    </label>
+    <label class="field">
+      源 VCF（按旧参考调用的单样本 VCF，每行单 ALT）
+      <span class="hint">（不超过 {{ vcf_limit_kib }} KiB）</span>
+      <input type="file" name="vcf" accept=".vcf,text/plain" required>
+    </label>
+    <button type="submit">开始转换</button>
+  </form>
+</div>
+
+<div class="card rules">
+  <h2 style="color:var(--ink)">映射表与转换规则</h2>
+  <ul>
+    <li>每个映射块列出旧、新两侧的 <strong>1 基闭区间</strong>与方向；两侧区间<strong>等长</strong>，同一侧各块之间<strong>互不重叠</strong>（端点相接允许），可选首行表头 <span class="mono">old_start&nbsp;old_end&nbsp;new_start&nbsp;new_end&nbsp;strand</span>。</li>
+    <li>变异沿用现有规则：REF 对照旧参考校验，GT 必须为非缺失、未分相的二倍体；仅接受每行<strong>单 ALT</strong> 的单碱基替换，或事件长度不超过 20 bp 的纯插入 / 纯缺失。</li>
+    <li>正向块坐标一一对应；<strong>反向块</strong>坐标镜像、等位反向互补，插缺在新链上重新锚定，再按新参考左对齐归一化。</li>
+    <li>同一目标归一变异<strong>合并剂量</strong>，目标 VCF 的 <span class="mono">INFO/SRC</span> 标注全部源 VCF 物理行号，GT 标注合并后的 <span class="mono">0/1</span> 或 <span class="mono">1/1</span>。</li>
+    <li>变异<strong>跨块、无映射、目标 REF 不符或合并剂量超过 2</strong> 时整批失败，不生成部分文件。</li>
+  </ul>
+</div>
+{% endblock %}

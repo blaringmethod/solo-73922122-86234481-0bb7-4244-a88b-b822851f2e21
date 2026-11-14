@@ -18,7 +18,14 @@
     }
     .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
     header h1 { margin: 0 0 4px; font-size: 26px; }
-    header p { margin: 0 0 24px; color: var(--muted); }
+    header p { margin: 0 0 16px; color: var(--muted); }
+    .nav { display: flex; gap: 10px; margin-bottom: 24px; }
+    .navlink {
+      text-decoration: none; font-weight: 600; font-size: 14px;
+      padding: 7px 16px; border-radius: 999px; border: 1px solid var(--line);
+      color: var(--ink); background: var(--card);
+    }
+    .navlink.active { background: var(--accent); border-color: var(--accent); color: #fff; }
     .card {
       background: var(--card); border: 1px solid var(--line);
       border-radius: 12px; padding: 24px; margin-bottom: 20px;
@@ -80,8 +87,12 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>双 VCF 变异核对</h1>
-    <p>同一参考、同一样本，两套变异识别程序结果复查工具</p>
+    <h1>VCF 变异工具集</h1>
+    <p>双 VCF 归一化核对 · 旧参考到新参考的坐标转换</p>
+    <nav class="nav">
+      <a href="/" class="navlink{% if request.url.path == '/' %} active{% endif %}">双 VCF 核对</a>
+      <a href="/convert" class="navlink{% if request.url.path.startswith('/convert') %} active{% endif %}">参考坐标转换</a>
+    </nav>
   </header>
   {% block body %}{% endblock %}
 </div>
